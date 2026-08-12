@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.19;
-import {ERC20Burnable, ERC20} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Burnable.sol";
+pragma solidity ^0.8.19;
+import {ERC20Burnable,ERC20} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Burnable.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 // Layout of Contract:
@@ -24,7 +24,7 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 // private
 // view & pure functions
 contract DecentralizedStableCoin is ERC20Burnable, Ownable {
-    //第一步：安装ERC20（配置foundry.toml）  forge install openzeppelin/openzeppelin-contracts
+    //第一步：安装ERC20（配置foundry.toml）  forge install openzeppelin/openzeppelin-contracts@v4.8.3
     //第二步：引入Ownable管理者，可使用OnlyOwner保护函数
     error DecentralizedStableCoin__AmountMustBeMoreThanZero();
     error DecentralizedStableCoin__BurnAmountExceedsBalance();
@@ -43,17 +43,16 @@ contract DecentralizedStableCoin is ERC20Burnable, Ownable {
         }
         super.burn(_amount);
     }
-  // 第四步：创建铸币方法，使用继承过来的_minit()
-    function mint(
-        address _to,
-        uint256 _amount
-    ) external onlyOwner returns (bool) {
+
+    // 第四步：创建铸币方法，使用继承过来的_minit()
+    function mint(address _to, uint256 _amount) external onlyOwner returns (bool) {
         if (_to == address(0)) {
             revert DecentralizedStableCoin__NotZeroAddress();
         }
         if (_amount <= 0) {
             revert DecentralizedStableCoin__AmountMustBeMoreThanZero();
         }
-        _mint(_to,_amount);
+        _mint(_to, _amount);
+        return true;
     }
 }
