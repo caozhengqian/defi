@@ -35,8 +35,9 @@ contract DSCEngineTest is Test {
     //////////////////
     function testGetUsdValue() public view {
         uint256 ethAmount = 15e18;
-        // 正确结果是： 15e18 ETH * $2000/ETH = $30,000e18
+        // anvil（sepolia上不是，要计算真实价格）上正确结果是： 15e18 ETH * $2000/ETH = $30,000e18
         uint256 expectedUsd = 30_000e18;
+        console.log('weth=',weth);
         uint256 usdValue = dsce.getUsdValue(weth, ethAmount);
         assertEq(usdValue, expectedUsd);
     }

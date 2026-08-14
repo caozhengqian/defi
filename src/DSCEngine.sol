@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 import {DecentralizedStableCoin} from "./DecentralizedStableCoin.sol";
-import { ReentrancyGuard } from "@openzeppelin/contracts/security/ReentrancyGuard.sol";
-import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
 
 /*
@@ -54,6 +54,7 @@ contract DSCEngine is ReentrancyGuard {
     //使用indexed关键字索引，日志中更容易搜索和过滤。
     //对于地址类型的参数，使用indexed可根据特定的地址来查找相关的事件日志。
     event CollateralDeposited(address indexed user, address indexed token, uint256 indexed amount);
+    event CollateralRedeemed(address indexed user, address indexed token, uint256 amount);
     ///////////////////
     // Modifiers
     ///////////////////
@@ -90,7 +91,15 @@ contract DSCEngine is ReentrancyGuard {
     ///////////////////
     // External Functions
     ///////////////////
-    function depositCollateralAndMintDsc() external {}
+    // 存入抵押物和铸造币合在一起
+    function depositCollateralAndMintDsc(
+        address tokenCollateralAddress,
+        uint256 amountCollateral,
+        uint256 amountDscToMint
+    ) external {
+        depositCollateral(tokenCollateralAddress, amountCollateral);
+        mintDsc(amountDscToMint);
+    }
 
     /*
      * @param tokenCollateralAddress: The ERC20 token address of the collateral you're depositing
@@ -99,7 +108,7 @@ contract DSCEngine is ReentrancyGuard {
     // 第六步：存入抵押品，使用IERC20的transferFrom()方法将用户的抵押品转入合约
     // nonReentrant防止重放攻击
     function depositCollateral(address tokenCollateralAddress, uint256 amountCollateral)
-        external
+        public
         moreThanZero(amountCollateral)
         isAllowedToken(tokenCollateralAddress)
         nonReentrant
@@ -111,12 +120,46 @@ contract DSCEngine is ReentrancyGuard {
             revert DSCEngine__TransferFailed();
         }
     }
-
-    function redeemCollateralForDsc() external {}
-
-    function redeemCollateral() external {}
-
-    function burnDsc() external {}
+    /*
+    * 1. health factor must be over 1 after collatearl pulled
+    * CEI:Check,Effects,Interactions
+    * 第十二步0：提取抵押物+燃烧币
+    * tokenCollateralAddress：The collateral address to redeem
+    * amountCollateral: The amount of collateral to redeem
+    * amountDscToBurn: The amount of DSC to burn
+    */
+    function redeemCollateralForDsc(address tokenCollateralAddress, uint256 amountCollateral,uint256 amountDscToBurn)
+        public
+    {
+        burnDsc(amountDscToBurn);
+        redeemCollateral(tokenCollateralAddress,amountCollateral);
+        // redeemCollateral already checks health factor;
+    }
+//第十二步2：赎回抵押物，并检查抵押物是否健康
+    function redeemCollateral(address tokenCollateralAddress, uint256 amountCollateral)
+        public
+        moreThanZero(amountCollateral)
+        nonReentrant
+    {
+        s_collateralDeposited[msg.sender][tokenCollateralAddress] -= amountCollateral;
+        emit CollateralRedeemed(msg.sender,tokenCollateralAddress,amountCollateral);
+        // _calculateHealthFactorAfter()
+        bool success = IERC20(tokenCollateralAddress).transfer(msg.sender, amountCollateral);
+        if(!success){
+            revert DSCEngine__TransferFailed();
+        }
+        _revertIfHealthFactorIsBroken(msg.sender);
+    }
+//第十二步1：燃烧币,并检查抵押物是否健康
+    function burnDsc(uint256 amount) public moreThanZero(amount){
+        s_DSCMinted[msg.sender] -= amount;
+        bool success = i_dsc.transferFrom(msg.sender,address(this),amount);
+        if(!success){
+            revert DSCEngine__TransferFailed();
+        }
+        i_dsc.burn(amount);
+         _revertIfHealthFactorIsBroken(msg.sender);
+    }
 
     function liquidate() external {}
 
@@ -132,13 +175,13 @@ contract DSCEngine is ReentrancyGuard {
     // 第八步：创造DSC币
     function mintDsc(uint256 amountDscToMint) public moreThanZero(amountDscToMint) nonReentrant {
         s_DSCMinted[msg.sender] += amountDscToMint;
-        // 检验抵押物
-        _revertIfHealthFactorIsBroken(msg.sender);
-        bool minted = i_dsc.mint(msg.sender, amountDscToMint);
 
+        bool minted = i_dsc.mint(msg.sender, amountDscToMint);
         if (minted != true) {
             revert DSCEngine__MintFailed();
         }
+                // 检验抵押物
+            (msg.sender);
     }
 
     //第七步3：计算所有token的USD价格
