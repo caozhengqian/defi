@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 import {DecentralizedStableCoin} from "./DecentralizedStableCoin.sol";
-import { ReentrancyGuard } from "@openzeppelin/contracts/security/ReentrancyGuard.sol";
-import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
 
 /*
@@ -36,15 +36,20 @@ contract DSCEngine is ReentrancyGuard {
     // State Variables
     ///////////////////
     /// @dev Mapping of token address to price feed address
+    // ETH=》ETH的USD价格地址；BTC=>BTC的USD价格地址；
+    // [ETH=>价格地址]
     mapping(address collateralToken => address priceFeed) private s_priceFeeds;
     DecentralizedStableCoin private immutable i_dsc;
     uint256 private constant LIQUIDATION_THRESHOLD = 50; // This means you need to be 200% over-collateralized
     uint256 private constant LIQUIDATION_PRECISION = 100;
     uint256 private constant MIN_HEALTH_FACTOR = 1e18;
     /// @dev Amount of collateral deposited by user
+    // [A用户=>[ETH=>100]
     mapping(address user => mapping(address collateralToken => uint256 amount)) private s_collateralDeposited;
+    // 铸造币数量[A用户=>100 DSC币]
     mapping(address user => uint256 amount) private s_DSCMinted;
     /// @dev If we know exactly how many tokens we have, we could make this immutable!
+    // 抵押物token，[ETH,BTC]
     address[] private s_collateralTokens;
     uint256 private constant ADDITIONAL_FEED_PRECISION = 1e10;
     uint256 private constant PRECISION = 1e18;
@@ -54,6 +59,7 @@ contract DSCEngine is ReentrancyGuard {
     //使用indexed关键字索引，日志中更容易搜索和过滤。
     //对于地址类型的参数，使用indexed可根据特定的地址来查找相关的事件日志。
     event CollateralDeposited(address indexed user, address indexed token, uint256 indexed amount);
+    event CollateralRedeemed(address indexed user, address indexed token, uint256 amount);
     ///////////////////
     // Modifiers
     ///////////////////
@@ -90,7 +96,15 @@ contract DSCEngine is ReentrancyGuard {
     ///////////////////
     // External Functions
     ///////////////////
-    function depositCollateralAndMintDsc() external {}
+    // 存入抵押物和铸造币合在一起
+    function depositCollateralAndMintDsc(
+        address tokenCollateralAddress,
+        uint256 amountCollateral,
+        uint256 amountDscToMint
+    ) external {
+        depositCollateral(tokenCollateralAddress, amountCollateral);
+        mintDsc(amountDscToMint);
+    }
 
     /*
      * @param tokenCollateralAddress: The ERC20 token address of the collateral you're depositing
@@ -99,7 +113,7 @@ contract DSCEngine is ReentrancyGuard {
     // 第六步：存入抵押品，使用IERC20的transferFrom()方法将用户的抵押品转入合约
     // nonReentrant防止重放攻击
     function depositCollateral(address tokenCollateralAddress, uint256 amountCollateral)
-        external
+        public
         moreThanZero(amountCollateral)
         isAllowedToken(tokenCollateralAddress)
         nonReentrant
@@ -112,13 +126,69 @@ contract DSCEngine is ReentrancyGuard {
         }
     }
 
-    function redeemCollateralForDsc() external {}
+    /*
+    * 1. health factor must be over 1 after collatearl pulled
+    * CEI:Check,Effects,Interactions
+    * 第十二步0：提取抵押物+燃烧币
+    * tokenCollateralAddress：The collateral address to redeem
+    * amountCollateral: The amount of collateral to redeem
+    * amountDscToBurn: The amount of DSC to burn
+    */
+    function redeemCollateralForDsc(address tokenCollateralAddress, uint256 amountCollateral, uint256 amountDscToBurn)
+        public
+    {
+        burnDsc(amountDscToBurn);
+        redeemCollateral(tokenCollateralAddress, amountCollateral);
+        // redeemCollateral already checks health factor;
+    }
 
-    function redeemCollateral() external {}
+    //第十二步2：赎回抵押物，并检查抵押物是否健康
+    function redeemCollateral(address tokenCollateralAddress, uint256 amountCollateral)
+        public
+        moreThanZero(amountCollateral)
+        nonReentrant
+    {
+        //s_collateralDeposited:抵押物[A用户=>[ETH=>100]
+        s_collateralDeposited[msg.sender][tokenCollateralAddress] -= amountCollateral;
+        emit CollateralRedeemed(msg.sender, tokenCollateralAddress, amountCollateral);
+        // _calculateHealthFactorAfter()
+        bool success = IERC20(tokenCollateralAddress).transfer(msg.sender, amountCollateral);
+        if (!success) {
+            revert DSCEngine__TransferFailed();
+        }
+        _revertIfHealthFactorIsBroken(msg.sender);
+    }
 
-    function burnDsc() external {}
+    //第十二步1：燃烧币,并检查抵押物是否健康
+    function burnDsc(uint256 amount) public moreThanZero(amount) {
+        s_DSCMinted[msg.sender] -= amount;//[A用户=>100 DSC币]
+        bool success = i_dsc.transferFrom(msg.sender, address(this), amount);
+        if (!success) {
+            revert DSCEngine__TransferFailed();
+        }
+        i_dsc.burn(amount);
+        _revertIfHealthFactorIsBroken(msg.sender);
+    }
+    // If we do start nearing undercollateralization,we need someone to liquidate positions
+    // $100 ETH backing $50 DSC
+    // $ 20 ETH back $50 DSC ,DSC isn't worth $1!!!
 
-    function liquidate() external {}
+    // If someone is almost undercollateralized, we will pay you to liquidate them!
+    // $75 backing $50 DSC
+    // Liquidator take $75 backing and burns off the $50 DSC
+    /*
+    * @param collateral: The erc20 collateral address to liquidate from the user
+    * @param user: The user who has broken the health factor. Their _healthFactor should be below below MIN_HEALTH_FACTOR
+    * @param debtToCover(需偿还债务):The amount of DSC you want to burn to improve the users health factor(你希望消耗多少DSC恢复健康)
+    *   @notice You can partially liquidate a user.
+    *   @notice You will get a liquidation bonus for taking the users funds
+    *   @
+    */
+    function liquidate(address collateral, address user, uint256 debtToCover)
+        external
+        moreThanZero(debtToCover)
+        nonReentrant
+    {}
 
     function getHealthFactor() external {}
 
@@ -131,14 +201,14 @@ contract DSCEngine is ReentrancyGuard {
      */
     // 第八步：创造DSC币
     function mintDsc(uint256 amountDscToMint) public moreThanZero(amountDscToMint) nonReentrant {
-        s_DSCMinted[msg.sender] += amountDscToMint;
-        // 检验抵押物
-        _revertIfHealthFactorIsBroken(msg.sender);
-        bool minted = i_dsc.mint(msg.sender, amountDscToMint);
+        s_DSCMinted[msg.sender] += amountDscToMint;//s_DSCMinted:[A用户=>100 DSC币]
 
+        bool minted = i_dsc.mint(msg.sender, amountDscToMint);//创造DSC代币
         if (minted != true) {
             revert DSCEngine__MintFailed();
         }
+        // 检验抵押物
+        (msg.sender);
     }
 
     //第七步3：计算所有token的USD价格
@@ -146,8 +216,8 @@ contract DSCEngine is ReentrancyGuard {
         //loop through each collateral token,get the amount they have deposited,and map it to
         //the price, to get the USD value
         for (uint256 index = 0; index < s_collateralTokens.length; index++) {
-            address token = s_collateralTokens[index];
-            uint256 amount = s_collateralDeposited[user][token];
+            address token = s_collateralTokens[index];//[ETH,BTC]
+            uint256 amount = s_collateralDeposited[user][token];//[A用户=>[ETH=>100]
             totalCollateralValueInUsd += getUsdValue(token, amount);
         }
         return totalCollateralValueInUsd;
@@ -155,6 +225,7 @@ contract DSCEngine is ReentrancyGuard {
 
     //第七步4：通过聚合器获取抵押物的USD价格
     function getUsdValue(address token, uint256 amount) public view returns (uint256) {
+        //s_priceFeeds:[ETH=>价格地址]
         AggregatorV3Interface priceFeed = AggregatorV3Interface(s_priceFeeds[token]);
         (, int256 price,,,) = priceFeed.latestRoundData();
 
@@ -199,7 +270,7 @@ contract DSCEngine is ReentrancyGuard {
         view
         returns (uint256 totalDescMinted, uint256 collateralValueInUsd)
     {
-        totalDescMinted = s_DSCMinted[user];
+        totalDescMinted = s_DSCMinted[user];//s_DSCMinted[A用户=>100 DSC币]
         collateralValueInUsd = getAccountCollateralValue(user);
         // loop through each collateral token, get the amount they have deposited, and convert it to USD value
         // add all the USD values together

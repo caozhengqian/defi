@@ -29,10 +29,11 @@ contract HelperConfig is Script {
 //第十步1：获取抵押价格：获取Sepolia上的ETH/USD,BTC/USD的价格地址，获取weth以太币和wbtc比特币的地址
     function getSepoliaEthConfig() public view returns (NetworkConfig memory) {
         return NetworkConfig({
+            //测试的价格地址：https://docs.chain.link/data-feeds/price-feeds/addresses?networkType=testnet#sepolia-testnet
             wethUsdPriceFeed: 0x694AA1769357215DE4FAC081bf1f309aDC325306,
             wbtcUsdPriceFeed: 0xdd13E55209Fd76AfE204dBda4007C227904f0a81,
-            weth: 0xdd13E55209Fd76AfE204dBda4007C227904f0a81,
-            wbtc: 0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063,
+            weth: 0xdd13E55209Fd76AfE204dBda4007C227904f0a81,//老师给的eth地址
+            wbtc: 0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063,//老师给的btc地址
             deployerKey: vm.envUint("PRIVATE_KEY")
         });
     }
